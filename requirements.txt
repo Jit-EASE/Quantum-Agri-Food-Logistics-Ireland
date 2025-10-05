@@ -1,0 +1,54 @@
+# === Core Framework ===
+streamlit>=1.37.0
+pandas>=2.2.2
+numpy>=1.26.4
+matplotlib>=3.9.0
+
+# === Network and Graph Optimization ===
+networkx>=3.3
+dimod>=0.12.15          # For QUBO / quantum-inspired formulations
+dwave-system>=1.25.0     # Optional if connecting to D-Wave solvers
+ortools>=9.9.3963        # Classical VRP / routing baseline
+
+# === Econometric & Statistical Analysis ===
+statsmodels>=0.14.2
+scipy>=1.13.0
+sympy>=1.12
+
+# === Quantum / Probabilistic Simulation (Optional) ===
+qiskit>=1.1.0            # Optional quantum hardware mapping
+pennylane>=0.39.0        # Variational Quantum Eigensolver (VQE/QAOA support)
+
+# === Data Visualization and Mapping ===
+folium>=0.16.0
+streamlit-folium>=0.20.0
+branca>=0.7.0
+plotly>=5.24.1           # For possible interactive econometric plots
+geopandas>=1.0.1
+shapely>=2.0.4
+pyproj>=3.6.1
+
+# === Machine Learning / AI Decision Agents ===
+openai>=1.46.0           # For GPT-4o-mini contextual agent integration
+tiktoken>=0.8.0
+requests>=2.32.0
+
+# === Data I/O and Utility Libraries ===
+jsonschema>=4.22.0
+PyYAML>=6.0.2
+joblib>=1.4.2
+
+# === Optional Visualization Enhancements ===
+bokeh>=3.5.0
+altair>=5.4.1
+
+# === Development & Debugging Utilities ===
+black>=24.8.0
+flake8>=7.1.1
+pylint>=3.2.5
+ipython>=8.26.0
+
+# === Notes ===
+# - OpenAI API requires an environment variable: OPENAI_API_KEY
+# - Qiskit and D-Wave are optional; remove if you’re not using true quantum hardware
+# - Tested on Python 3.12 (macOS / Linux)

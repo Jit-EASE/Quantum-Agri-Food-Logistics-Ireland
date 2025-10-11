@@ -764,7 +764,7 @@ with c1:
 with c2:
     target = st.selectbox("Select export port", port_ids, index=0, key=wkey("tgt"))
 with c3:
-    st.caption("Arcs show co-op/hub → selected port flows (synthetic).")
+    st.caption("Arcs show co-op/hub → selected port flows.")
 
 # Solve chosen path
 if solver.startswith("Classical"):

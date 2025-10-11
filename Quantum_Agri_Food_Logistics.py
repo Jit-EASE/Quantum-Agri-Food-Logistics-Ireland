@@ -32,7 +32,7 @@ except Exception:
 # ==============================
 # Page + stable widget keys
 # ==============================
-st.set_page_config(page_title="Quantum Agri Supply Chain Routes", layout="wide")
+st.set_page_config(page_title="Automated Agri Supply Chain Routes", layout="wide")
 
 if "WKEY_NS" not in st.session_state:
     st.session_state["WKEY_NS"] = f"ns_{uuid.uuid4().hex[:8]}"
@@ -748,8 +748,8 @@ with st.sidebar:
 # ==============================
 # Main UI
 # ==============================
-st.title("QuantumAgriChain — Ireland")
-st.caption("Choropleth by county yields • Slender arcs for flows • QSTP routing • qLDPC-style stabilization • MC • Markov • DiD • GPT agent")
+st.title("Automated AgriChain Network (Fusion Econometric System) — Ireland")
+st.caption("Choropleth by county yields • Slender arcs for flows • QSTP routing • qLDPC stabilization • MC • Markov • DiD • GPT agent")
 
 # Apply policy costs
 apply_policy_costs(G, carbon_price=carbon_price, gps_spreader=gps_spreader, truck_co2_factor=truck_co2_factor)
@@ -810,7 +810,7 @@ else:
     st.warning("No path found with current graph configuration.")
 
 st.markdown("---")
-st.markdown("### B. Quantum Supply Network Map — Ireland’s Agri-Food Logistics and Yield Dynamics")
+st.markdown("### B. Supply Network Map — Ireland’s Agri-Food Logistics and Yield Dynamics")
 
 # Yields (year-modulated & qLDPC-style)
 yr_phase = (year - 2015) / 20.0
@@ -862,7 +862,7 @@ colD.metric("Eco-scheme adoption (%)", f"{adoption_rate}")
 # D. Monte Carlo — yield uncertainty
 # ==============================
 if enable_mc:
-    st.markdown("### D. Monte Carlo — Yield Uncertainty")
+    st.markdown("### D. MTC - Yield Uncertainty")
     mc_stats = monte_carlo_yields(
         COUNTY_DF,
         drought=adj_drought, fert_cap=adj_fert, carbon_price=adj_carbon,
@@ -885,7 +885,7 @@ if enable_mc:
 # ==============================
 panel_yields = None
 if enable_markov:
-    st.markdown("### E. Markov Chain — Weather Regimes")
+    st.markdown("### E. MKC - Weather Regimes")
     years_panel = list(range(int(panel_start), int(panel_end) + 1))
     T = len(years_panel)
 
@@ -908,7 +908,7 @@ if enable_markov:
 # F. Difference-in-Differences (DiD)
 # ==============================
 if enable_did:
-    st.markdown("### F. Difference-in-Differences (DiD) — Eco-scheme impact")
+    st.markdown("### F. DiD - Eco-scheme impact")
     if panel_yields is not None:
         did_panel = panel_yields.copy()
     else:
@@ -957,7 +957,7 @@ if use_agent and not os.getenv("OPENAI_API_KEY"):
 # G. GPT Agent — contextual decision for optimal routing
 # ==========================================================
 if use_agent:
-    st.markdown("### G. AI Decision Agent (GPT)")
+    st.markdown("### G. AI Decision Agent")
 
     # Collect econometrics artifacts if they exist
     mc_stats_ctx = mc_stats if 'mc_stats' in locals() else None
@@ -985,7 +985,7 @@ if use_agent:
     with cA:
         st.json(ctx, expanded=False)
 
-    go = st.button("Run GPT decision agent", key=wkey("run_agent"))
+    go = st.button("Run decision agent", key=wkey("run_agent"))
     if go:
         try:
             decision = call_openai_agent(model_choice, ctx)

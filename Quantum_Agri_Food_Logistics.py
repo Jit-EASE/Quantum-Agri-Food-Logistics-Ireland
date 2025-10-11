@@ -94,10 +94,42 @@ COOPS = [
 HUBS = [
     {"id": "hub_limerick", "type": "hub", "lat": 52.67, "lon": -8.62, "county": "Limerick"},
 ]
+
+# ==============================
+# Expanded list of ROI ports (commercial + key regional)
+# ==============================
 PORTS = [
-    {"id": "port_dublin", "type": "port", "lat": 53.346, "lon": -6.195},
-    {"id": "port_cork", "type": "port", "lat": 51.86, "lon": -8.33},
-    {"id": "port_rosslare", "type": "port", "lat": 52.26, "lon": -6.34},
+    # East & East-North
+    {"id": "port_dublin",        "type": "port", "lat": 53.346, "lon": -6.195, "name": "Dublin"},
+    {"id": "port_dunlaoghaire",  "type": "port", "lat": 53.293, "lon": -6.135, "name": "Dún Laoghaire"},
+    {"id": "port_howth",         "type": "port", "lat": 53.389, "lon": -6.065, "name": "Howth"},
+    {"id": "port_drogheda",      "type": "port", "lat": 53.720, "lon": -6.250, "name": "Drogheda"},
+    {"id": "port_dundalk",       "type": "port", "lat": 54.004, "lon": -6.404, "name": "Dundalk"},
+    {"id": "port_greenore",      "type": "port", "lat": 54.039, "lon": -6.129, "name": "Greenore"},
+    {"id": "port_wicklow",       "type": "port", "lat": 52.991, "lon": -6.033, "name": "Wicklow"},
+    {"id": "port_arklow",        "type": "port", "lat": 52.795, "lon": -6.140, "name": "Arklow"},
+    {"id": "port_rosslare",      "type": "port", "lat": 52.260, "lon": -6.340, "name": "Rosslare Europort"},
+
+    # South & South-East
+    {"id": "port_waterford",     "type": "port", "lat": 52.246, "lon": -7.031, "name": "Waterford (Belview)"},
+    {"id": "port_newross",       "type": "port", "lat": 52.394, "lon": -6.951, "name": "New Ross"},
+    {"id": "port_cork",          "type": "port", "lat": 51.860, "lon": -8.330, "name": "Port of Cork"},
+    {"id": "port_kinsale",       "type": "port", "lat": 51.703, "lon": -8.526, "name": "Kinsale"},
+    {"id": "port_bantry",        "type": "port", "lat": 51.656, "lon": -9.488, "name": "Bantry Bay / Whiddy"},
+
+    # South-West & West
+    {"id": "port_castletownbere", "type": "port", "lat": 51.650, "lon": -9.910, "name": "Castletownbere"},
+    {"id": "port_dingle",         "type": "port", "lat": 52.140, "lon": -10.270, "name": "Dingle"},
+    {"id": "port_fenit",          "type": "port", "lat": 52.280, "lon": -9.865, "name": "Fenit (Tralee)"},
+    {"id": "port_shannon_foynes", "type": "port", "lat": 52.610, "lon": -9.110, "name": "Shannon Foynes"},
+    {"id": "port_limerick",       "type": "port", "lat": 52.650, "lon": -8.650, "name": "Limerick Dock"},
+    {"id": "port_galway",         "type": "port", "lat": 53.270, "lon": -9.050, "name": "Galway"},
+    {"id": "port_rossaveal",      "type": "port", "lat": 53.266, "lon": -9.596, "name": "Rossaveal"},
+
+    # North-West & North
+    {"id": "port_sligo",         "type": "port", "lat": 54.280, "lon": -8.590, "name": "Sligo"},
+    {"id": "port_killybegs",     "type": "port", "lat": 54.634, "lon": -8.452, "name": "Killybegs"},
+    {"id": "port_donegal",       "type": "port", "lat": 54.628, "lon": -8.110, "name": "Donegal Bay (regional)"},
 ]
 
 NODES = FARM_NODES + COOPS + HUBS + PORTS
@@ -757,12 +789,17 @@ apply_policy_costs(G, carbon_price=carbon_price, gps_spreader=gps_spreader, truc
 # A) Routing & Flows
 st.markdown("### A. Routing & Flows")
 farm_ids = [n["id"] for n in FARM_NODES]
-port_ids = [p["id"] for p in PORTS]
+
+# Friendly port dropdown -> internal id
+port_options = {p.get("name", p["id"]): p["id"] for p in PORTS}
+port_label_list = list(port_options.keys())
+
 c1, c2, c3 = st.columns([1,1,1])
 with c1:
     source = st.selectbox("Select source farm", farm_ids, index=0, key=wkey("src"))
 with c2:
-    target = st.selectbox("Select export port", port_ids, index=0, key=wkey("tgt"))
+    target_label = st.selectbox("Select export port", port_label_list, index=0, key=wkey("tgt_label"))
+    target = port_options[target_label]
 with c3:
     st.caption("Arcs show co-op/hub → selected port flows.")
 
@@ -781,9 +818,6 @@ if len(path) >= 2:
 
 # Build synthetic flows coop/hub -> selected port
 ch_nodes = COOPS + HUBS
-farm_nearest = {c["id"]: 0 for c in ch_nodes}
-for farm in FARM_KODES if False else FARM_NODES:  # keep linter calm; real iter is FARM_NODES
-    pass
 farm_nearest = {c["id"]: 0 for c in ch_nodes}
 for farm in FARM_NODES:
     dlist = [(c["id"], haversine(farm["lat"], farm["lon"], c["lat"], c["lon"])) for c in ch_nodes]

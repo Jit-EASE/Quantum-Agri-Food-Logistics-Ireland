@@ -1,10 +1,12 @@
 # quantum_agri_ireland_folium.py
 # Streamlit app — Ireland choropleth (Folium) + slender arcs (flows)
-# QSTP (classical/quantum-inspired) + policy-aware costs + qLDPC-style stabilization
-# + Monte Carlo + Markov weather regimes + Difference-in-Differences (DiD) + GPT Decision Agent (robust API)
-# Author: Jit | Date: 2025-10-05
+# Real-world OSM A* routing + truck constraints + turn penalties
+# QSTP (classical/quantum-inspired) + policy-aware costs + qLDPC stabilization
+# + Monte Carlo + Markov + Difference-in-Differences (DiD) + GPT Decision Agent (robust API)
+# Author: Jit | Updated: 2025-10-12
 
 import os
+import re
 import math
 import uuid
 import random
@@ -29,6 +31,13 @@ try:
 except Exception:
     HAS_STATSMODELS = False
 
+# Optional OSM real-world routing
+try:
+    import osmnx as ox
+    HAS_OSMNX = True
+except Exception:
+    HAS_OSMNX = False
+
 # ==============================
 # Page + stable widget keys
 # ==============================
@@ -41,7 +50,7 @@ def wkey(name: str) -> str:
     return f"{st.session_state['WKEY_NS']}__{name}"
 
 # ==============================
-# Base data (synthetic nodes + county centroids)
+# Helpers
 # ==============================
 def haversine(lat1, lon1, lat2, lon2):
     R = 6371.0
@@ -51,6 +60,9 @@ def haversine(lat1, lon1, lat2, lon2):
     a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlambda/2)**2
     return 2 * R * math.asin(math.sqrt(a))
 
+# ==============================
+# Base data (synthetic nodes + county centroids)
+# ==============================
 COUNTY_COORDS = [
     ("Dublin", 53.3498, -6.2603),
     ("Cork", 51.8985, -8.4756),
@@ -95,9 +107,7 @@ HUBS = [
     {"id": "hub_limerick", "type": "hub", "lat": 52.67, "lon": -8.62, "county": "Limerick"},
 ]
 
-# ==============================
-# Expanded list of ROI ports (commercial + key regional)
-# ==============================
+# Expanded ROI ports (commercial + key regional)
 PORTS = [
     # East & East-North
     {"id": "port_dublin",        "type": "port", "lat": 53.346, "lon": -6.195, "name": "Dublin"},
@@ -136,7 +146,7 @@ NODES = FARM_NODES + COOPS + HUBS + PORTS
 NODES_DF = pd.DataFrame(NODES)
 
 # ==============================
-# Logistics graph + policy-aware costs
+# Synthetic logistics graph + policy-aware costs
 # ==============================
 G = nx.Graph()
 for n in NODES:
@@ -186,8 +196,16 @@ def apply_policy_costs(graph: nx.Graph, carbon_price: float, gps_spreader: bool,
                                     truck_co2_factor=truck_co2_factor)
 
 # ==============================
-# QSTP (classical + quantum-inspired)
+# QSTP (classical + quantum-inspired) on synthetic graph
 # ==============================
+def routing_subgraph_for_target(G_full: nx.Graph, target_port_id: str, ports: List[Dict]) -> nx.Graph:
+    """Copy G but remove all port nodes except the selected target (ports as sinks)."""
+    H = G_full.copy()
+    for p in ports:
+        if p["id"] != target_port_id and H.has_node(p["id"]):
+            H.remove_node(p["id"])
+    return H
+
 def classical_shortest_path(graph, source, target, weight="cost"):
     try:
         path = nx.shortest_path(graph, source=source, target=target, weight=weight)
@@ -276,7 +294,6 @@ def monte_carlo_yields(
     n_sims: int = 1000, seed: int = 123,
     nitrogen_limit: float = 0.0, multispecies_sward: bool = False
 ) -> pd.DataFrame:
-    """Return per-county distributional stats from MC draws."""
     fert_scale = (1.0 - 0.4 * nitrogen_limit) * (0.9 if multispecies_sward else 1.0)
     sims = []
     for k in range(n_sims):
@@ -301,14 +318,13 @@ def monte_carlo_yields(
 
 def markov_weather_regimes(
     T: int,
-    p_dd: float = 0.7,   # P(dry→dry)
-    p_ww: float = 0.7,   # P(wet→wet)
-    p0_dry: float = 0.5, # initial prob(dry)
+    p_dd: float = 0.7,
+    p_ww: float = 0.7,
+    p0_dry: float = 0.5,
     dry_penalty: float = 0.5,
     wet_bonus: float = 0.2,
     seed: int = 123
 ) -> dict:
-    """Two-state Markov chain (dry/wet) and stationary distribution."""
     transition = np.array([[p_dd, 1 - p_dd],
                            [1 - p_ww, p_ww]])
     denom = (2 - p_dd - p_ww)
@@ -327,7 +343,6 @@ def markov_weather_regimes(
             "dry_penalty": dry_penalty, "wet_bonus": wet_bonus}
 
 def apply_weather_regime_to_yields(base_yield_df: pd.DataFrame, regime: dict, years: List[int]) -> pd.DataFrame:
-    """Create panel: county, year, yield_t adjusted by Markov regime."""
     assert len(years) == len(regime["states"]), "Years must match Markov length"
     rows = []
     for i, yr in enumerate(years):
@@ -344,7 +359,6 @@ def difference_in_differences(
     treat_year: int,
     cluster_se: bool = True
 ) -> dict:
-    """TWFE DiD (statsmodels if available) or 2x2 fallback. Returns dict of results."""
     panel = panel_df.copy()
     panel["treated"] = panel["county"].isin(treated_counties).astype(int)
     panel["post"] = (panel["year"] >= treat_year).astype(int)
@@ -361,7 +375,6 @@ def difference_in_differences(
         return {"model": model, "att": att, "se": se, "pvalue": pval, "nobs": model.nobs,
                 "note": "TWFE (statsmodels)"}
 
-    # Fallback 2x2
     pre = panel[panel["year"] < treat_year]
     post = panel[panel["year"] >= treat_year]
     d_treated = post[post["treated"] == 1]["yield_t"].mean() - pre[pre["treated"] == 1]["yield_t"].mean()
@@ -370,177 +383,133 @@ def difference_in_differences(
     return {"model": None, "att": att, "se": np.nan, "pvalue": np.nan, "nobs": len(panel),
             "note": "2x2 DiD (fallback)"}
 
-# ==========================================================
-# GPT Agent: robust OpenAI call (Responses API -> fallback to Chat Completions)
-# ==========================================================
-def build_agent_context(
-    year: int,
-    solver: str,
-    path: List[str],
-    plen_km: float,
-    gps_spreader: bool,
-    truck_co2_factor: float,
-    yield_df: pd.DataFrame,
-    mc_stats: Optional[pd.DataFrame],
-    regime: Optional[dict],
-    did_result: Optional[dict],
-    flow_df: Optional[pd.DataFrame],
-    carbon_price: float,
-    nitrates_per_ha: float,
-    adoption_rate: int
-) -> dict:
-    """Assemble a compact, serializable context the agent can reason over."""
-    ctx = {
-        "year": year,
-        "solver": solver,
-        "route": {
-            "nodes": path,
-            "length_km": None if (plen_km is None or (isinstance(plen_km, float) and not np.isfinite(plen_km))) else float(plen_km),
-            "gps_spreader": bool(gps_spreader),
-            "truck_co2_factor_t_per_ton_km": float(truck_co2_factor),
-            "est_route_emissions_t_per_ton": (0.0 if plen_km in [None, float('inf')] else float(plen_km) * float(truck_co2_factor))
-        },
-        "policy": {
-            "carbon_price_eur_per_t": float(carbon_price),
-            "nitrates_kg_per_ha": float(nitrates_per_ha),
-            "eco_scheme_adoption_pct": int(adoption_rate),
-        },
-        "yields": {
-            "by_county": yield_df.sort_values("county").to_dict(orient="records"),
-            "mean": float(yield_df["yield_t"].mean()),
-            "min": float(yield_df["yield_t"].min()),
-            "max": float(yield_df["yield_t"].max()),
-        },
-        "flows_sample": (None if flow_df is None else flow_df.head(25).to_dict(orient="records")),
-        "uncertainty_mc": (None if mc_stats is None else {
-            "by_county": mc_stats.sort_values("county").to_dict(orient="records"),
-            "portfolio_cv": float((mc_stats["sd"]/mc_stats["mean"]).mean())
-        }),
-        "markov": (None if regime is None else {
-            "stationary": list(map(float, regime["stationary"])),
-            "realized_dry_share": float((regime["states"]==0).mean()),
-            "dry_penalty": float(regime["dry_penalty"]),
-            "wet_bonus": float(regime["wet_bonus"])
-        }),
-        "did": (None if did_result is None else {
-            "att": None if did_result.get("att") is None else float(did_result["att"]),
-            "se": None if np.isnan(did_result.get("se", np.nan)) else float(did_result["se"]),
-            "pvalue": None if np.isnan(did_result.get("pvalue", np.nan)) else float(did_result["pvalue"]),
-            "note": did_result.get("note")
-        })
-    }
-    return ctx
+# ==============================
+# Real-world routing (OSM A*)
+# ==============================
+def build_osm_drive_graph(place: str = "Ireland",
+                          truck_gvw_tons: Optional[float] = None,
+                          min_speed_kph: float = 5.0) -> Optional["nx.MultiDiGraph"]:
+    if not HAS_OSMNX:
+        return None
+    ox.settings.use_cache = True
+    ox.settings.log_console = False
 
-def _parse_json_loose(text: str) -> dict:
-    """
-    Parse a JSON object from a string that may contain extra text.
-    Looks for the first {...} block and tries to json.loads it.
-    """
-    import json as _json
-    if not isinstance(text, str):
-        raise ValueError("No text to parse from model output.")
-
-    # Fast path
+    G = ox.graph_from_place(place, network_type="drive", simplify=True)
+    # speeds & travel time
     try:
-        return _json.loads(text)
+        G = ox.add_edge_speeds(G)          # older/newer API variant
     except Exception:
         pass
+    try:
+        G = ox.add_edge_travel_times(G)
+    except Exception:
+        # fallback: approximate from length & speed_kph if missing
+        for _, _, k, data in G.edges(keys=True, data=True):
+            sp = data.get("speed_kph", 50.0) or 50.0
+            dist_km = (data.get("length", 0.0) or 0.0)/1000.0
+            data["travel_time"] = (dist_km / max(5.0, sp)) * 3600.0
 
-    # Loose scan for the first top-level JSON object
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        candidate = text[start:end+1]
+    # bearings for turn costs
+    try:
+        G = ox.bearing.add_edge_bearings(G)
+    except Exception:
         try:
-            return _json.loads(candidate)
+            G = ox.add_edge_bearings(G)
         except Exception:
             pass
 
-    raise ValueError("Model did not return valid JSON.")
+    # coarse truck filtering
+    for u, v, k, data in list(G.edges(keys=True, data=True)):
+        sp = data.get("speed_kph", None)
+        if sp is None or sp <= 0:
+            data["speed_kph"] = max(min_speed_kph, 30.0)
 
-def call_openai_agent(model: str, context: dict) -> dict:
-    """
-    Robust agent call:
-      1) Try Responses API (older SDKs omit response_format).
-      2) Fallback to Chat Completions with JSON mode.
-    Returns a dict with keys:
-      route_verdict, primary_objective, rationale, risk_flags, sensitivity, recommended_actions, kpis
-    """
-    import json as _json
-    client = OpenAI()  # reads OPENAI_API_KEY
+        if truck_gvw_tons is not None:
+            hgv = str(data.get("hgv", "")).lower()
+            if hgv in ("no", "destination"):
+                G.remove_edge(u, v, k)
+                continue
+            mw = data.get("maxweight")
+            if mw is not None:
+                try:
+                    m = re.search(r"[0-9]+(\.[0-9]+)?", str(mw))
+                    if m and float(m.group()) < float(truck_gvw_tons):
+                        G.remove_edge(u, v, k)
+                        continue
+                except Exception:
+                    pass
+    return G
 
-    schema_keys_hint = (
-        "Return ONLY a JSON object with keys: "
-        "route_verdict, primary_objective, rationale, risk_flags, sensitivity, recommended_actions, kpis. "
-        "Within sensitivity include carbon_price_breakpoint, nitrate_threshold_kg_ha, mc_p95_drop_t_ha. "
-        "Within kpis include est_route_len_km, est_emissions_t_per_ton, mean_yield_t_ha, portfolio_cv."
-    )
+def _edge_cost_hours(data: dict,
+                     w_time: float = 1.0,
+                     w_dist: float = 0.0,
+                     w_emiss: float = 0.0,
+                     truck_load_tons: float = 1.0,
+                     co2_per_ton_km: float = 0.0001) -> float:
+    dist_km = (data.get("length", 0.0) or 0.0) / 1000.0
+    tt_h = ((data.get("travel_time", None) or (dist_km / max(5.0, data.get("speed_kph", 50.0)) * 3600.0)) / 3600.0)
+    emis = dist_km * co2_per_ton_km * truck_load_tons
+    return w_time * tt_h + w_dist * dist_km + w_emiss * emis
 
-    system_msg = (
-        "You are a supply chain policy co-pilot for Irish agriculture. "
-        "Given routing (QSTP), stabilized yields (qLDPC), Markov weather regimes, Monte Carlo uncertainty, "
-        "and a DiD policy effect, decide whether to accept the proposed route, or how to revise it. "
-        "Be conservative when uncertainty or DiD indicates harm. "
-        "Output must be strict JSON (no prose outside JSON)."
-    )
-    user_msg = (
-        "Objectives, in order: minimize emissions subject to acceptable cost and resilience. "
-        "Consider eco-scheme adoption, nitrates limits, and high-uncertainty counties. "
-        + schema_keys_hint
-    )
-
-    # ---- 1) Try Responses API (without response_format) ----
-    try:
-        resp = client.responses.create(
-            model=model,
-            reasoning={"effort": "medium"},
-            input=[
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": user_msg},
-                {"role": "user", "content": {"type": "input_json", "json": context}},
-            ],
+def apply_osm_cost(G: "nx.MultiDiGraph",
+                   w_time: float, w_dist: float, w_emiss: float,
+                   truck_load_tons: float, co2_per_ton_km: float) -> None:
+    for u, v, k, data in G.edges(keys=True, data=True):
+        data["gen_cost"] = _edge_cost_hours(
+            data, w_time=w_time, w_dist=w_dist, w_emiss=w_emiss,
+            truck_load_tons=truck_load_tons, co2_per_ton_km=co2_per_ton_km
         )
-        out = getattr(resp, "output_json", None)
-        if isinstance(out, dict):
-            return out
 
-        # Generic text extraction across SDK variants
-        try:
-            text = getattr(resp, "output_text", None)
-            if text is None:
-                # Attempt to navigate a generic structure
-                text = resp.output[0].content[0].text  # type: ignore[attr-defined]
-        except Exception:
-            text = str(resp)
-
-        parsed = _parse_json_loose(text)
-        return parsed
-    except TypeError:
-        # Likely older SDK signature mismatch
-        pass
+def _bearing_on(G, u, v, k) -> Optional[float]:
+    try:
+        return G[u][v][k].get("bearing")
     except Exception:
-        # Any runtime error—fall through to fallback
-        pass
+        return None
 
-    # ---- 2) Fallback: Chat Completions with JSON mode ----
-    try:
-        cc = client.chat.completions.create(
-            model=model,
-            temperature=0.2,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": user_msg},
-                {"role": "user", "content": f"Context JSON:\n{_json.dumps(context)}"},
-            ],
-        )
-        text = cc.choices[0].message.content
-        return _parse_json_loose(text)
-    except Exception as e:
-        raise RuntimeError(f"OpenAI call failed in both modes: {e}")
+def approximate_turn_penalty_seconds(G: "nx.MultiDiGraph", path: List[int]) -> float:
+    if len(path) < 3:
+        return 0.0
+    penalty_s = 0.0
+    for i in range(len(path) - 2):
+        u, v, w = path[i], path[i+1], path[i+2]
+        try:
+            k1 = next(iter(G[u][v].keys()))
+            k2 = next(iter(G[v][w].keys()))
+        except Exception:
+            continue
+        b1 = _bearing_on(G, u, v, k1)
+        b2 = _bearing_on(G, v, w, k2)
+        if b1 is None or b2 is None:
+            continue
+        ang = abs((b2 - b1 + 180) % 360 - 180)  # [0,180]
+        if ang > 170:
+            penalty_s += 60.0  # strong U-turn discouragement
+        penalty_s += (ang * ang) / 800.0  # ~40s @180°, ~5s @63°
+    return penalty_s
+
+def osm_astar_route(G: "nx.MultiDiGraph",
+                    orig_lat: float, orig_lon: float,
+                    dest_lat: float, dest_lon: float,
+                    w_time: float = 1.0, w_dist: float = 0.0, w_emiss: float = 0.0,
+                    truck_load_tons: float = 1.0, co2_per_ton_km: float = 0.0001):
+    assert HAS_OSMNX, "OSM routing requires osmnx."
+    orig = ox.nearest_nodes(G, X=orig_lon, Y=orig_lat)
+    dest = ox.nearest_nodes(G, X=dest_lon, Y=dest_lat)
+    apply_osm_cost(G, w_time, w_dist, w_emiss, truck_load_tons, co2_per_ton_km)
+
+    def h(n1, n2):
+        y1, x1 = G.nodes[n1]["y"], G.nodes[n1]["x"]
+        y2, x2 = G.nodes[n2]["y"], G.nodes[n2]["x"]
+        d = haversine(y1, x1, y2, x2)  # km
+        return d / 110.0  # optimistic hours @ 110 kph
+
+    path = nx.astar_path(G, orig, dest, heuristic=h, weight="gen_cost", allow_switches=True)
+    length_h = nx.path_weight(G, path, weight="gen_cost")  # generalized-hours
+    turns_s = approximate_turn_penalty_seconds(G, path)
+    return path, length_h, turns_s
 
 # ==============================
-# Folium builder: Ireland choropleth + slender arcs + highlighted route
+# Folium builder: choropleth + slender arcs + highlighted route
 # ==============================
 def build_ireland_folium_map(
     yield_df: pd.DataFrame,
@@ -582,7 +551,7 @@ def build_ireland_folium_map(
             name="Yield choropleth",
         ).add_to(m)
 
-        # Popups per feature
+        # Popups
         for feat in gj.get("features", []):
             props = feat.get("properties", {})
             name = props.get("county") or props.get("name") or props.get("NAME") or "Unknown county"
@@ -597,7 +566,7 @@ def build_ireland_folium_map(
         cmap.add_to(m)
 
     else:
-        # Fallback: centroid markers colored by yield
+        # Fallback: centroid markers
         y_min = float(yield_df["yield_t"].min()); y_max = float(yield_df["yield_t"].max())
         cmap = LinearColormap(["#3f8efc", "#5cb85c", "#f0ad4e", "#d9534f"], vmin=y_min, vmax=y_max)
         cmap.caption = "Yield (t/ha)"
@@ -691,8 +660,22 @@ with st.sidebar:
     year = st.slider("Year", 2015, 2035, 2025, 1, key=wkey("year"))
 
     st.markdown("---")
+    st.markdown("**Routing network source**")
+    routing_source = st.radio(
+        "Choose network",
+        options=["OSM (real-world A*)", "Synthetic (demo graph)"],
+        index=0,
+        key=wkey("routing_source")
+    )
+    truck_gvw = st.number_input("Truck gross weight (t)", min_value=1.0, value=26.0, step=1.0, key=wkey("truck_gvw"))
+    truck_load_tons = st.number_input("Payload (t)", min_value=0.1, value=20.0, step=0.5, key=wkey("truck_payload"))
+    w_time = st.slider("Cost weight — time", 0.0, 2.0, 1.0, 0.1, key=wkey("w_time"))
+    w_dist = st.slider("Cost weight — distance", 0.0, 2.0, 0.0, 0.1, key=wkey("w_dist"))
+    w_emiss = st.slider("Cost weight — emissions", 0.0, 2.0, 0.5, 0.1, key=wkey("w_emiss"))
+
+    st.markdown("---")
     st.markdown("**Routing (QSTP)**")
-    solver = st.selectbox("Routing solver", ["Classical (Dijkstra)", "Quantum-inspired (annealing)"], key=wkey("solver"))
+    solver = st.selectbox("Routing solver (synthetic only)", ["Classical (Dijkstra)", "Quantum-inspired (annealing)"], key=wkey("solver"))
     n_trials = st.slider("Annealing trials", 8, 256, 64, 8, key=wkey("trials"))
     temp = st.slider("Annealing temperature", 0.1, 5.0, 1.0, 0.1, key=wkey("temp"))
 
@@ -727,18 +710,9 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("**AI Decision Agent**")
-    use_agent = st.checkbox(
-        "Enable GPT agent for route decision",
-        value=True,
-        key=wkey("agent_enable"),
-    )
-    model_choice = st.selectbox(
-        "Agent model",
-        options=["gpt-4.1-mini", "gpt-4o-mini"],
-        index=0,
-        key=wkey("agent_model"),
-        help="Use 4.1 mini if available; otherwise 4o-mini."
-    )
+    use_agent = st.checkbox("Enable GPT agent for route decision", value=True, key=wkey("agent_enable"))
+    model_choice = st.selectbox("Agent model", options=["gpt-4.1-mini", "gpt-4o-mini"], index=0,
+                                key=wkey("agent_model"), help="Use 4.1 mini if available; otherwise 4o-mini.")
 
     st.markdown("---")
     st.markdown("**Presets**")
@@ -755,24 +729,18 @@ with st.sidebar:
             "panel_start": int(panel_start), "panel_end": int(panel_end),
             "enable_did": enable_did, "treat_year": int(treat_year),
             "treated_counties": treated_counties, "cluster_se": bool(cluster_se),
-            "use_agent": use_agent, "model_choice": model_choice
+            "use_agent": use_agent, "model_choice": model_choice,
+            "routing_source": routing_source, "truck_gvw": float(truck_gvw),
+            "truck_load_tons": float(truck_load_tons),
+            "w_time": float(w_time), "w_dist": float(w_dist), "w_emiss": float(w_emiss)
         }
         st.success("Preset saved in session.")
     if st.button("Load preset", key=wkey("load_preset")):
         p = st.session_state.get("preset")
         if p:
-            drought = p["drought"]; fert_cap = p["fert_cap"]; carbon_price = p["carbon_price"]
-            nitrogen_limit = p["nitrogen_limit"]; gps_spreader = p["gps_spreader"]; multispecies_sward = p["multispecies_sward"]
-            adoption_rate = p.get("adoption_rate", adoption_rate); nitrates_per_ha = p.get("nitrates_per_ha", nitrates_per_ha)
-            year = p["year"]; solver = p["solver"]; n_trials = p["n_trials"]; temp = p["temp"]
-            use_qldpc = p["use_qldpc"]; ensemble = p["ensemble"]; truck_co2_factor = p.get("truck_co2_factor", truck_co2_factor)
-            enable_mc = p.get("enable_mc", enable_mc); n_sims = p.get("n_sims", n_sims)
-            enable_markov = p.get("enable_markov", enable_markov); p_dd = p.get("p_dd", p_dd); p_ww = p.get("p_ww", p_ww)
-            dry_penalty = p.get("dry_penalty", dry_penalty); wet_bonus = p.get("wet_bonus", wet_bonus)
-            panel_start = p.get("panel_start", panel_start); panel_end = p.get("panel_end", panel_end)
-            enable_did = p.get("enable_did", enable_did); treat_year = p.get("treat_year", treat_year)
-            treated_counties = p.get("treated_counties", treated_counties); cluster_se = p.get("cluster_se", cluster_se)
-            use_agent = p.get("use_agent", use_agent); model_choice = p.get("model_choice", model_choice)
+            # restore (widgets will rerender on rerun)
+            for k, v in p.items():
+                st.session_state[wkey(k)] = v
             st.experimental_rerun()
         else:
             st.info("No preset stored yet.")
@@ -781,9 +749,9 @@ with st.sidebar:
 # Main UI
 # ==============================
 st.title("Automated AgriChain Network (Fusion Econometric System) — Ireland")
-st.caption("Choropleth by county yields • Slender arcs for flows • QSTP routing • qLDPC stabilization • MC • Markov • DiD • GPT agent")
+st.caption("OSM A* routing • Ports as sinks • Choropleth + arcs • QSTP • qLDPC • MC • Markov • DiD • GPT agent")
 
-# Apply policy costs
+# Apply policy costs (synthetic layer)
 apply_policy_costs(G, carbon_price=carbon_price, gps_spreader=gps_spreader, truck_co2_factor=truck_co2_factor)
 
 # A) Routing & Flows
@@ -803,20 +771,7 @@ with c2:
 with c3:
     st.caption("Arcs show co-op/hub → selected port flows.")
 
-# Solve chosen path
-if solver.startswith("Classical"):
-    path, plen = classical_shortest_path(G, source, target, weight="cost")
-else:
-    path, plen = quantum_inspired_shortest_path(G, source, target, weight="cost", n_trials=n_trials, temp=temp)
-
-# Route segments (lat,lon -> lat,lon)
-route_segments: List[Tuple[Tuple[float, float], Tuple[float, float]]] = []
-if len(path) >= 2:
-    for u, v in zip(path[:-1], path[1:]):
-        u_node, v_node = G.nodes[u], G.nodes[v]
-        route_segments.append(((u_node["lat"], u_node["lon"]), (v_node["lat"], v_node["lon"])))
-
-# Build synthetic flows coop/hub -> selected port
+# Build synthetic flows coop/hub -> selected port (for map arcs)
 ch_nodes = COOPS + HUBS
 farm_nearest = {c["id"]: 0 for c in ch_nodes}
 for farm in FARM_NODES:
@@ -826,22 +781,84 @@ for farm in FARM_NODES:
 
 year_factor = 1.0 + 0.01 * (year - 2020)
 flows = []
-port = next(p for p in PORTS if p["id"] == target)
+port_node = next(p for p in PORTS if p["id"] == target)
 for c in ch_nodes:
     base_vol = max(10, 12 * farm_nearest[c["id"]])
     vol = int(base_vol * year_factor)
     flows.append({
         "source_lat": c["lat"], "source_lon": c["lon"],
-        "target_lat": port["lat"], "target_lon": port["lon"],
+        "target_lat": port_node["lat"], "target_lon": port_node["lon"],
         "volume": vol
     })
 flow_df = pd.DataFrame(flows)
 
+# ---------------- OSM Graph Build/Cache ----------------
+OSM_G = None
+if routing_source.startswith("OSM"):
+    if not HAS_OSMNX:
+        st.error("OSM routing selected but `osmnx` is not installed. `pip install osmnx`")
+    else:
+        if "OSM_G" not in st.session_state:
+            with st.spinner("Loading OSM road network for Ireland…"):
+                st.session_state["OSM_G"] = build_osm_drive_graph("Ireland", truck_gvw_tons=float(truck_gvw))
+        OSM_G = st.session_state.get("OSM_G")
+
+# ---------------- Solve route ----------------
+route_segments: List[Tuple[Tuple[float, float], Tuple[float, float]]] = []
+path, plen = [], float("inf")
+route_hours, dist_km, turn_pen_s = 0.0, 0.0, 0.0
+
+if routing_source.startswith("OSM") and HAS_OSMNX and OSM_G is not None:
+    farm_node = next(n for n in NODES if n["id"] == source)
+    try:
+        node_path, plen_h, turn_s = osm_astar_route(
+            OSM_G,
+            farm_node["lat"], farm_node["lon"],
+            port_node["lat"], port_node["lon"],
+            w_time=w_time, w_dist=w_dist, w_emiss=w_emiss,
+            truck_load_tons=float(truck_load_tons),
+            co2_per_ton_km=float(truck_co2_factor)
+        )
+        # Convert node path to segments for Folium
+        for u, v in zip(node_path[:-1], node_path[1:]):
+            route_segments.append(((OSM_G.nodes[u]["y"], OSM_G.nodes[u]["x"]),
+                                   (OSM_G.nodes[v]["y"], OSM_G.nodes[v]["x"])))
+        # KPIs
+        route_hours = float(plen_h)
+        try:
+            # sum length across first parallel edge (approx)
+            for u, v in zip(node_path[:-1], node_path[1:]):
+                k = next(iter(OSM_G[u][v].keys()))
+                dist_km += (OSM_G[u][v][k].get("length", 0.0) or 0.0) / 1000.0
+        except Exception:
+            pass
+        turn_pen_s = float(turn_s)
+        path = [source, port_node["id"]]
+        plen = dist_km
+        st.info(f"OSM A* route ≈ {route_hours:.2f} hours (+~{turn_pen_s:.0f}s turns), distance ≈ {dist_km:.1f} km.")
+    except Exception as e:
+        st.error(f"OSM routing failed: {e}")
+        path, plen, route_segments = [], float("inf"), []
+else:
+    # Synthetic graph with ports-as-sinks subgraph
+    H = routing_subgraph_for_target(G, target, PORTS)
+    if solver.startswith("Classical"):
+        path, plen = classical_shortest_path(H, source, target, weight="cost")
+    else:
+        path, plen = quantum_inspired_shortest_path(H, source, target, weight="cost", n_trials=int(n_trials), temp=float(temp))
+    if len(path) >= 2:
+        for u, v in zip(path[:-1], path[1:]):
+            u_node, v_node = H.nodes[u], H.nodes[v]
+            route_segments.append(((u_node["lat"], u_node["lon"]), (v_node["lat"], v_node["lon"])))
+    # Synthetic KPIs (distance-based)
+    dist_km = float(plen) if np.isfinite(plen) else 0.0
+    route_hours = dist_km/60.0 if dist_km > 0 else 0.0
+    st.info(f"Synthetic {solver} path ≈ {dist_km:.1f} km (~{route_hours:.2f} h @60kph). Ports are sinks (no transit).")
+
 if path:
-    st.info(f"{year} • Solver: **{solver}** — GPS={'On' if gps_spreader else 'Off'} — Path ≈ **{plen:.1f} km** — Hops: {len(path)-1}")
     st.code(" -> ".join(path), language="text")
 else:
-    st.warning("No path found with current graph configuration.")
+    st.warning("No path found with current configuration.")
 
 st.markdown("---")
 st.markdown("### B. Supply Network Map — Ireland’s Agri-Food Logistics and Yield Dynamics")
@@ -854,7 +871,7 @@ adj_fert = float(min(1.0, max(0.0, fert_cap * fert_scale + 0.10 * math.cos(2 * m
 adj_carbon = float(max(0.0, carbon_price * (0.9 + 0.2 * yr_phase)))
 
 if use_qldpc:
-    yield_df = qldpc_stabilize(COUNTY_DF, drought=adj_drought, fert_cap=adj_fert, carbon_price=adj_carbon, ensemble=ensemble)
+    yield_df = qldpc_stabilize(COUNTY_DF, drought=adj_drought, fert_cap=adj_fert, carbon_price=adj_carbon, ensemble=int(ensemble))
     st.caption(f"{year} • Stabilized via ensemble={ensemble} + parity smoothing")
 else:
     yield_df = simulate_yield(COUNTY_DF, drought=adj_drought, fert_cap=adj_fert, carbon_price=adj_carbon, seed=7)
@@ -884,19 +901,18 @@ with st.expander("Show county yield table"):
 st.markdown("---")
 st.markdown("### C. SDG/ESG KPIs")
 mean_yield = float(yield_df['yield_t'].mean())
-route_km = float(plen) if 'plen' in locals() and isinstance(plen, (int, float)) and plen < float('inf') else 0.0
-route_emissions_t = route_km * truck_co2_factor  # tCO₂ per ton
+route_emissions_t = float(dist_km) * float(truck_co2_factor)  # tCO2 per payload-ton
 colA, colB, colC, colD = st.columns(4)
 colA.metric("SDG 2 — Yield adequacy (t/ha)", f"{mean_yield:.2f}")
 colB.metric("SDG 12 — Nitrates (kg/ha)", f"{nitrates_per_ha:.0f}")
 colC.metric("SDG 13 — Route emissions (tCO₂ per ton)", f"{route_emissions_t:.4f}")
-colD.metric("Eco-scheme adoption (%)", f"{adoption_rate}")
+colD.metric("Travel time (hours)", f"{route_hours:.2f}")
 
 # ==============================
 # D. Monte Carlo — yield uncertainty
 # ==============================
 if enable_mc:
-    st.markdown("### D. MTC - Yield Uncertainty")
+    st.markdown("### D. Monte Carlo — Yield Uncertainty")
     mc_stats = monte_carlo_yields(
         COUNTY_DF,
         drought=adj_drought, fert_cap=adj_fert, carbon_price=adj_carbon,
@@ -919,7 +935,7 @@ if enable_mc:
 # ==============================
 panel_yields = None
 if enable_markov:
-    st.markdown("### E. MKC - Weather Regimes")
+    st.markdown("### E. Markov Chain — Weather Regimes")
     years_panel = list(range(int(panel_start), int(panel_end) + 1))
     T = len(years_panel)
 
@@ -942,7 +958,7 @@ if enable_markov:
 # F. Difference-in-Differences (DiD)
 # ==============================
 if enable_did:
-    st.markdown("### F. DiD - Eco-scheme impact")
+    st.markdown("### F. Difference-in-Differences (DiD) — Eco-scheme impact")
     if panel_yields is not None:
         did_panel = panel_yields.copy()
     else:
@@ -972,9 +988,143 @@ if enable_did:
         with st.expander("Show DiD regression summary"):
             st.text(result["model"].summary())
 
-# ==========================================================
-# Safety defaults for agent variables (avoid NameError if sidebar is refactored)
-# ==========================================================
+# ==============================
+# GPT Agent (robust OpenAI call)
+# ==============================
+def build_agent_context(
+    year: int,
+    solver: str,
+    path: List[str],
+    plen_km: float,
+    gps_spreader: bool,
+    truck_co2_factor: float,
+    yield_df: pd.DataFrame,
+    mc_stats: Optional[pd.DataFrame],
+    regime: Optional[dict],
+    did_result: Optional[dict],
+    flow_df: Optional[pd.DataFrame],
+    carbon_price: float,
+    nitrates_per_ha: float,
+    adoption_rate: int
+) -> dict:
+    ctx = {
+        "year": year,
+        "solver": solver,
+        "route": {
+            "nodes": path,
+            "length_km": None if (plen_km is None or (isinstance(plen_km, float) and not np.isfinite(plen_km))) else float(plen_km),
+            "gps_spreader": bool(gps_spreader),
+            "truck_co2_factor_t_per_ton_km": float(truck_co2_factor),
+            "est_route_emissions_t_per_ton": (0.0 if plen_km in [None, float('inf')] else float(plen_km) * float(truck_co2_factor))
+        },
+        "policy": {
+            "carbon_price_eur_per_t": float(carbon_price),
+            "nitrates_kg_per_ha": float(nitrates_per_ha),
+            "eco_scheme_adoption_pct": int(adoption_rate),
+        },
+        "yields": {
+            "by_county": yield_df.sort_values("county").to_dict(orient="records"),
+            "mean": float(yield_df["yield_t"].mean()),
+            "min": float(yield_df["yield_t"].min()),
+            "max": float(yield_df["yield_t"].max()),
+        },
+        "flows_sample": (None if flow_df is None else flow_df.head(25).to_dict(orient="records")),
+        "uncertainty_mc": (None if mc_stats is None else {
+            "by_county": mc_stats.sort_values("county").to_dict(orient="records"),
+            "portfolio_cv": float((mc_stats["sd"]/mc_stats["mean"]).mean())
+        }),
+        "markov": (None if regime is None else {
+            "stationary": list(map(float, regime["stationary"])),
+            "realized_dry_share": float((regime["states"]==0).mean()),
+            "dry_penalty": float(regime["dry_penalty"]),
+            "wet_bonus": float(regime["wet_bonus"])
+        }),
+        "did": (None if did_result is None else {
+            "att": None if did_result.get("att") is None else float(did_result["att"]),
+            "se": None if np.isnan(did_result.get("se", np.nan)) else float(did_result["se"]),
+            "pvalue": None if np.isnan(did_result.get("pvalue", np.nan)) else float(did_result["pvalue"]),
+            "note": did_result.get("note")
+        })
+    }
+    return ctx
+
+def _parse_json_loose(text: str) -> dict:
+    import json as _json
+    if not isinstance(text, str):
+        raise ValueError("No text to parse from model output.")
+    try:
+        return _json.loads(text)
+    except Exception:
+        pass
+    start = text.find("{"); end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        candidate = text[start:end+1]
+        try:
+            return _json.loads(candidate)
+        except Exception:
+            pass
+    raise ValueError("Model did not return valid JSON.")
+
+def call_openai_agent(model: str, context: dict) -> dict:
+    import json as _json
+    client = OpenAI()  # reads OPENAI_API_KEY
+    schema_keys_hint = (
+        "Return ONLY a JSON object with keys: "
+        "route_verdict, primary_objective, rationale, risk_flags, sensitivity, recommended_actions, kpis. "
+        "Within sensitivity include carbon_price_breakpoint, nitrate_threshold_kg_ha, mc_p95_drop_t_ha. "
+        "Within kpis include est_route_len_km, est_emissions_t_per_ton, mean_yield_t_ha, portfolio_cv."
+    )
+    system_msg = (
+        "You are a supply chain policy co-pilot for Irish agriculture. "
+        "Given routing (QSTP/OSM), stabilized yields (qLDPC), Markov weather regimes, Monte Carlo uncertainty, "
+        "and a DiD policy effect, decide whether to accept the proposed route, or how to revise it. "
+        "Be conservative when uncertainty or DiD indicates harm. "
+        "Output must be strict JSON (no prose outside JSON)."
+    )
+    user_msg = (
+        "Objectives, in order: minimize emissions subject to acceptable cost and resilience. "
+        "Consider eco-scheme adoption, nitrates limits, and high-uncertainty counties. " + schema_keys_hint
+    )
+    # 1) Responses API (without response_format)
+    try:
+        resp = client.responses.create(
+            model=model,
+            reasoning={"effort": "medium"},
+            input=[
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg},
+                {"role": "user", "content": {"type": "input_json", "json": context}},
+            ],
+        )
+        out = getattr(resp, "output_json", None)
+        if isinstance(out, dict):
+            return out
+        try:
+            text = getattr(resp, "output_text", None)
+            if text is None:
+                text = resp.output[0].content[0].text  # type: ignore[attr-defined]
+        except Exception:
+            text = str(resp)
+        return _parse_json_loose(text)
+    except TypeError:
+        pass
+    except Exception:
+        pass
+    # 2) Chat Completions fallback (JSON mode)
+    cc = client.chat.completions.create(
+        model=model,
+        temperature=0.2,
+        response_format={"type": "json_object"},
+        messages=[
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": user_msg},
+            {"role": "user", "content": f"Context JSON:\n{_parse_json_loose if False else _json.dumps(context)}"},
+        ],
+    )
+    text = cc.choices[0].message.content
+    return _parse_json_loose(text)
+
+# Safety defaults for agent variables
 try:
     use_agent
 except NameError:
@@ -987,32 +1137,30 @@ except NameError:
 if use_agent and not os.getenv("OPENAI_API_KEY"):
     st.warning("OPENAI_API_KEY is not set. The GPT agent will fail to run. Set it in your environment.")
 
-# ==========================================================
+# ==============================
 # G. GPT Agent — contextual decision for optimal routing
-# ==========================================================
+# ==============================
 if use_agent:
     st.markdown("### G. AI Decision Agent")
-
-    # Collect econometrics artifacts if they exist
     mc_stats_ctx = mc_stats if 'mc_stats' in locals() else None
     regime_ctx = regime if 'regime' in locals() else None
-    did_ctx = result if ('result' in locals() and enable_did) else None
+    did_ctx = result if ('result' in locals() and 'result' is not None) else None
 
     ctx = build_agent_context(
         year=year,
-        solver=solver,
+        solver=("OSM A*" if routing_source.startswith("OSM") else solver),
         path=path,
-        plen_km=0.0 if (not path or not np.isfinite(plen)) else float(plen),
+        plen_km=float(dist_km),
         gps_spreader=gps_spreader,
-        truck_co2_factor=truck_co2_factor,
+        truck_co2_factor=float(truck_co2_factor),
         yield_df=yield_df,
         mc_stats=mc_stats_ctx,
         regime=regime_ctx,
         did_result=did_ctx,
         flow_df=flow_df,
-        carbon_price=carbon_price,
-        nitrates_per_ha=nitrates_per_ha,
-        adoption_rate=adoption_rate
+        carbon_price=float(carbon_price),
+        nitrates_per_ha=float(nitrates_per_ha),
+        adoption_rate=int(adoption_rate)
     )
 
     cA, cB = st.columns([1,1])
@@ -1024,7 +1172,6 @@ if use_agent:
         try:
             decision = call_openai_agent(model_choice, ctx)
             st.success("Agent decision received.")
-            # Pretty presentation
             st.subheader("Decision")
             st.write(f"**Verdict:** {decision.get('route_verdict','?')}  |  **Objective:** {decision.get('primary_objective','balanced')}")
             st.markdown("**Rationale**")
@@ -1043,7 +1190,6 @@ if use_agent:
 
             st.markdown("**Sensitivity**")
             st.json(decision.get("sensitivity", {}), expanded=False)
-
         except Exception as e:
             st.error(f"Agent call failed: {e}")
             st.info("Check OPENAI_API_KEY, model availability, or reduce context size.")
@@ -1051,8 +1197,7 @@ if use_agent:
 st.markdown("---")
 st.markdown("#### Notes")
 st.markdown(
-    "- Folium renders a flat **choropleth** (counties) and **slender arcs** for flows. Routing path is a thicker black polyline.\n"
-    "- QSTP is quantum-inspired (didactic); policy slider affects edge costs via carbon externality & GPS rebate.\n"
-    "- qLDPC is represented via ensemble + parity smoothing (intuitive stabilizer, not hardware error correction).\n"
-    "- Monte Carlo/Markov/DiD blocks are scenario-aware; plug in real panel data and literature coefficients to harden results."
+    "- **OSM A*** uses a directed drivable network with speeds/travel times; ports are treated as targets (no transit via other ports).\n"
+    "- Synthetic solver prunes non-target ports for sink behavior; policy sliders affect synthetic edge costs via carbon externality & GPS rebate.\n"
+    "- qLDPC here means ensemble+parity smoothing (intuitive stabilizer, not hardware QEC). Monte Carlo/Markov/DiD are scenario-aware."
 )
